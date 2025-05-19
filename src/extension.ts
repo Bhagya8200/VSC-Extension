@@ -8,7 +8,7 @@ interface FileStats {
   language: string;
   timeSpent: number;
   edits: number;
-  folderPath: string; // Added to track folder information
+  folderPath: string;
 }
 
 interface FolderStats {
@@ -22,51 +22,58 @@ interface SessionData {
   totalSessionTime?: number;
   activeCodingTime: number;
   debuggingTime: number;
-  idleTime: number; // Added to track idle time
+  idleTime: number;
   fileActivity: Record<string, FileStats>;
-  folderActivity: Record<string, FolderStats>; // Added to track folder activity
+  folderActivity: Record<string, FolderStats>;
   languageUsage: Record<string, number>;
   customNotes: string[];
 }
 
 const logPath = path.join(os.homedir(), ".code-session-tracker.json");
 let sessionStart = Date.now();
-let lastActivityTime = Date.now(); // Track any activity
+let lastActivityTime = Date.now();
 let lastEditTime = 0;
-let idleTimeout = 3 * 60 * 1000; // 3 minutes of inactivity considered idle
-let codingTimer: NodeJS.Timeout;
+let idleTimeout = 3 * 60 * 1000; // 3 minutes
 let debugStartTime: number | null = null;
 let activeCodingTime = 0;
 let debuggingTime = 0;
 let idleTime = 0;
 let isIdle = false;
 let activityCheckInterval: NodeJS.Timeout;
+let dashboardUpdateInterval: NodeJS.Timeout;
 const fileStats: Record<string, FileStats> = {};
-const folderStats: Record<string, FolderStats> = {}; // Tracking folder stats
+const folderStats: Record<string, FolderStats> = {};
 const languageUsage: Record<string, number> = {};
-let currentFocusedFile: string | null = null; // Track which file has focus
+let currentFocusedFile: string | null = null;
 let focusStartTime: number | null = null;
+
+// Store active dashboard panels for real-time updates
+let activeDashboardPanels: vscode.WebviewPanel[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
   initializeSessionFile();
-
   vscode.window.showInformationMessage("Code Session Tracker Started");
   
   // Start checking for inactivity
   startActivityChecking();
+  
+  // Start periodic updates
+  startPeriodicUpdates();
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument((e) => {
-      // Reset idle state when typing
+      const now = Date.now();
+      
+      // Reset idle state
       if (isIdle) {
         isIdle = false;
       }
       
-      const now = Date.now();
       lastActivityTime = now;
       
-      if (now - lastEditTime > 1000) {
-        activeCodingTime += Math.min(now - lastEditTime, 30000); // Cap at 30s to avoid counting long breaks
+      // Update active coding time
+      if (lastEditTime > 0 && now - lastEditTime < 30000) {
+        activeCodingTime += now - lastEditTime;
       }
       lastEditTime = now;
 
@@ -76,43 +83,47 @@ export function activate(context: vscode.ExtensionContext) {
       
       updateFileStats(file, lang, folderPath);
       updateFolderStats(folderPath);
+      
+      // Trigger immediate dashboard update
+      broadcastToDashboards();
     }),
 
     vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (!editor) {
-        // Handle when all editors are closed
-        updateFileTimeSpent();
-        currentFocusedFile = null;
-        focusStartTime = null;
-        return;
-      }
-      
       const now = Date.now();
       lastActivityTime = now;
       
       // Update time spent on previous file
       updateFileTimeSpent();
       
-      // Set new current file and start time
-      currentFocusedFile = editor.document.fileName;
-      focusStartTime = now;
-      
-      // Update language metrics
-      const lang = path.extname(currentFocusedFile).slice(1);
-      if (lang) { // Only track if we have a recognized language
-        languageUsage[lang] = languageUsage[lang] || 0;
+      if (editor) {
+        // Set new current file and start time
+        currentFocusedFile = editor.document.fileName;
+        focusStartTime = now;
+        
+        // Update language metrics
+        const lang = path.extname(currentFocusedFile).slice(1);
+        if (lang) {
+          languageUsage[lang] = languageUsage[lang] || 0;
+        }
+        
+        // Initialize file and folder stats if needed
+        const folderPath = path.dirname(currentFocusedFile);
+        updateFileStats(currentFocusedFile, lang, folderPath);
+        updateFolderStats(folderPath);
+      } else {
+        currentFocusedFile = null;
+        focusStartTime = null;
       }
       
-      // Initialize file and folder stats if needed
-      const folderPath = path.dirname(currentFocusedFile);
-      updateFileStats(currentFocusedFile, lang, folderPath);
-      updateFolderStats(folderPath);
+      // Trigger immediate dashboard update
+      broadcastToDashboards();
     }),
 
     vscode.debug.onDidStartDebugSession(() => {
       debugStartTime = Date.now();
       lastActivityTime = debugStartTime;
       isIdle = false;
+      broadcastToDashboards();
     }),
 
     vscode.debug.onDidTerminateDebugSession(() => {
@@ -120,20 +131,28 @@ export function activate(context: vscode.ExtensionContext) {
         debuggingTime += Date.now() - debugStartTime;
         lastActivityTime = Date.now();
         debugStartTime = null;
+        broadcastToDashboards();
       }
     }),
 
     vscode.commands.registerCommand("codeSessionTracker.addNote", async () => {
       const note = await vscode.window.showInputBox({
         prompt: "Add a note about your current session",
-        placeHolder: "e.g., Fixed authentication bug"
+        placeHolder: "e.g., Fixed authentication bug",
+        ignoreFocusOut: true
       });
       
-      if (note) {
-        const data = loadSessionData();
-        data.customNotes.push(`${new Date().toISOString()}: ${note}`);
-        saveSessionData(data);
-        vscode.window.showInformationMessage("Note added to session log");
+      if (note && note.trim()) {
+        try {
+          const data = loadSessionData();
+          const timestamp = new Date().toLocaleString();
+          data.customNotes.push(`${timestamp}: ${note.trim()}`);
+          saveSessionData(data);
+          vscode.window.showInformationMessage("Note added to session log");
+          broadcastToDashboards();
+        } catch (error) {
+          vscode.window.showErrorMessage(`Failed to add note: ${error}`);
+        }
       }
     }),
 
@@ -145,33 +164,41 @@ export function activate(context: vscode.ExtensionContext) {
         { enableScripts: true }
       );
 
+      // Add panel to active panels list
+      activeDashboardPanels.push(panel);
+
       panel.webview.html = getWebviewContent();
 
-      // Listen to changes in session data and send to WebView
-      function sendSessionData() {
-        saveSessionFile(); // Save current data
-        if (fs.existsSync(logPath)) {
-          const content = fs.readFileSync(logPath, "utf8");
-          panel.webview.postMessage({
-            type: "update",
-            data: JSON.parse(content),
-          });
+      // Send initial data immediately
+      sendSessionDataToPanel(panel);
+
+      // Handle messages from the webview
+      panel.webview.onDidReceiveMessage(
+        message => {
+          switch (message.command) {
+            case 'addNote':
+              // Execute the add note command
+              vscode.commands.executeCommand('codeSessionTracker.addNote');
+              break;
+            case 'exportData':
+              // Execute the export command
+              vscode.commands.executeCommand('codeSessionTracker.exportData');
+              break;
+          }
         }
-      }
+      );
 
-      // Send updates every 3 seconds
-      const interval = setInterval(sendSessionData, 3000);
-
+      // Remove panel from active list when disposed
       panel.onDidDispose(() => {
-        clearInterval(interval);
+        const index = activeDashboardPanels.indexOf(panel);
+        if (index > -1) {
+          activeDashboardPanels.splice(index, 1);
+        }
       });
-
-      // Send initial data
-      sendSessionData();
     }),
     
-    // Register command to export session data
     vscode.commands.registerCommand("codeSessionTracker.exportData", async () => {
+      saveSessionFile(); // Ensure data is up to date
       const data = loadSessionData();
       const exportPath = await vscode.window.showSaveDialog({
         defaultUri: vscode.Uri.file(path.join(os.homedir(), "code-session-export.json")),
@@ -207,6 +234,9 @@ function updateFileTimeSpent() {
         }
       }
     }
+    
+    // Reset the focus start time to current time
+    focusStartTime = now;
   }
 }
 
@@ -228,21 +258,19 @@ function updateFolderStats(folderPath: string) {
       timeSpent: 0, 
       files: 0 
     };
-    
-    // Count how many files we're tracking in this folder
-    folderStats[folderPath].files = Object.values(fileStats)
-      .filter(stat => stat.folderPath === folderPath)
-      .length;
   }
+  
+  // Update file count for this folder
+  folderStats[folderPath].files = Object.values(fileStats)
+    .filter(stat => stat.folderPath === folderPath)
+    .length;
 }
 
 function updateFolderTimeSpent(folderPath: string, timeSpent: number) {
-  if (folderStats[folderPath]) {
-    folderStats[folderPath].timeSpent += timeSpent;
-  } else {
+  if (!folderStats[folderPath]) {
     updateFolderStats(folderPath);
-    folderStats[folderPath].timeSpent += timeSpent;
   }
+  folderStats[folderPath].timeSpent += timeSpent;
 }
 
 function startActivityChecking() {
@@ -252,19 +280,89 @@ function startActivityChecking() {
     // Check if user is idle
     if (!isIdle && now - lastActivityTime > idleTimeout) {
       isIdle = true;
-      // Calculate idle time
-      idleTime += (now - lastActivityTime) - idleTimeout;
+      // Add idle time since the timeout period
+      const additionalIdleTime = (now - lastActivityTime) - idleTimeout;
+      if (additionalIdleTime > 0) {
+        idleTime += additionalIdleTime;
+      }
+    } else if (isIdle) {
+      // Continue adding idle time while user is idle
+      idleTime += 60000; // Add 1 minute
     }
     
-    // Save session data periodically
+    // Update time spent on current file
+    updateFileTimeSpent();
+    
+    // Save session data
     saveSessionFile();
+    
+    // Broadcast to dashboards
+    broadcastToDashboards();
   }, 60000); // Check every minute
+}
+
+function startPeriodicUpdates() {
+  dashboardUpdateInterval = setInterval(() => {
+    // Update time spent on current file
+    updateFileTimeSpent();
+    // Broadcast to all active dashboards
+    broadcastToDashboards();
+  }, 1000); // Update every second
+}
+
+function broadcastToDashboards() {
+  if (activeDashboardPanels.length > 0) {
+    activeDashboardPanels.forEach(panel => {
+      if (panel.visible) {
+        sendSessionDataToPanel(panel);
+      }
+    });
+  }
+}
+
+function sendSessionDataToPanel(panel: vscode.WebviewPanel) {
+  try {
+    const currentData = getCurrentSessionData();
+    panel.webview.postMessage({
+      type: "update",
+      data: currentData,
+    });
+  } catch (error) {
+    console.error("Error sending data to panel:", error);
+  }
+}
+
+function getCurrentSessionData(): SessionData {
+  // Get current session data without writing to file
+  updateFileTimeSpent(); // Make sure current file time is up to date
+  
+  const sessionEnd = Date.now();
+  const totalSessionTime = sessionEnd - sessionStart;
+  
+  const existingData = loadSessionData();
+
+  return {
+    sessionStart: new Date(sessionStart).toISOString(),
+    sessionEnd: new Date(sessionEnd).toISOString(),
+    totalSessionTime,
+    activeCodingTime,
+    debuggingTime,
+    idleTime,
+    fileActivity: { ...fileStats },
+    folderActivity: { ...folderStats },
+    languageUsage: { ...languageUsage },
+    customNotes: existingData.customNotes || [],
+  };
 }
 
 function loadSessionData(): SessionData {
   if (fs.existsSync(logPath)) {
-    const content = fs.readFileSync(logPath, "utf8");
-    return JSON.parse(content);
+    try {
+      const content = fs.readFileSync(logPath, "utf8");
+      return JSON.parse(content);
+    } catch (error) {
+      console.error("Error loading session data:", error);
+    }
   }
   
   return {
@@ -280,7 +378,11 @@ function loadSessionData(): SessionData {
 }
 
 function saveSessionData(data: SessionData) {
-  fs.writeFileSync(logPath, JSON.stringify(data, null, 2));
+  try {
+    fs.writeFileSync(logPath, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error("Error saving session data:", error);
+  }
 }
 
 function initializeSessionFile() {
@@ -294,55 +396,26 @@ function initializeSessionFile() {
     languageUsage: {},
     customNotes: [],
   };
-  fs.writeFileSync(logPath, JSON.stringify(initialData, null, 2));
+  saveSessionData(initialData);
 }
 
 function saveSessionFile() {
-  // Update file time spent for currently focused file
-  updateFileTimeSpent();
-  
-  const sessionEnd = Date.now();
-  const totalSessionTime = sessionEnd - sessionStart;
-
-  const data: SessionData = {
-    sessionStart: new Date(sessionStart).toISOString(),
-    sessionEnd: new Date(sessionEnd).toISOString(),
-    totalSessionTime,
-    activeCodingTime,
-    debuggingTime,
-    idleTime,
-    fileActivity: fileStats,
-    folderActivity: folderStats,
-    languageUsage,
-    customNotes: loadSessionData().customNotes || [],
-  };
-  fs.writeFileSync(logPath, JSON.stringify(data, null, 2));
+  const data = getCurrentSessionData();
+  saveSessionData(data);
 }
 
 function getWebviewContent(): string {
-  let data: SessionData = {
-    sessionStart: "",
-    activeCodingTime: 0,
-    debuggingTime: 0,
-    idleTime: 0,
-    fileActivity: {},
-    folderActivity: {},
-    languageUsage: {},
-    customNotes: [],
-  };
-  
-  if (fs.existsSync(logPath)) {
-    const content = fs.readFileSync(logPath, "utf8");
-    data = JSON.parse(content);
-  }
-
   return `
+    <!DOCTYPE html>
     <html>
 <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
       padding: 20px;
+      margin: 0;
     }
     .container {
       display: flex;
@@ -357,6 +430,7 @@ function getWebviewContent(): string {
     }
     h2, h3 {
       margin-top: 0;
+      color: var(--vscode-foreground);
     }
     table {
       border-collapse: collapse;
@@ -367,23 +441,30 @@ function getWebviewContent(): string {
       text-align: left;
       padding: 8px;
       border: 1px solid var(--vscode-panel-border);
+      color: var(--vscode-foreground);
     }
     th {
       background-color: var(--vscode-editor-inactiveSelectionBackground);
     }
     .overview-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 15px;
     }
     .overview-stat {
       background-color: var(--vscode-input-background);
       padding: 10px;
       border-radius: 4px;
+      border: 1px solid var(--vscode-input-border);
     }
-    .chart-container {
-      height: 250px;
-      position: relative;
+    .overview-stat strong {
+      color: var(--vscode-foreground);
+      display: block;
+      margin-bottom: 5px;
+    }
+    .overview-stat div {
+      color: var(--vscode-descriptionForeground);
+      font-family: monospace;
     }
     .tabs {
       display: flex;
@@ -395,6 +476,11 @@ function getWebviewContent(): string {
       cursor: pointer;
       border: 1px solid var(--vscode-panel-border);
       border-radius: 4px;
+      background-color: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+    }
+    .tab:hover {
+      background-color: var(--vscode-list-hoverBackground);
     }
     .tab.active {
       background-color: var(--vscode-button-background);
@@ -406,36 +492,79 @@ function getWebviewContent(): string {
     .tab-content.active {
       display: block;
     }
+    .loading {
+      text-align: center;
+      padding: 20px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .notes-list {
+      list-style-type: none;
+      padding: 0;
+    }
+    .notes-list li {
+      padding: 8px;
+      margin: 5px 0;
+      background-color: var(--vscode-input-background);
+      border-radius: 4px;
+      border: 1px solid var(--vscode-input-border);
+    }
+    .file-path {
+      font-family: monospace;
+      font-size: 0.9em;
+      color: var(--vscode-descriptionForeground);
+    }
+    .action-btn {
+      padding: 6px 12px;
+      border: 1px solid var(--vscode-button-border);
+      border-radius: 4px;
+      background-color: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      cursor: pointer;
+      font-size: 0.9em;
+      font-family: inherit;
+    }
+    .action-btn:hover {
+      background-color: var(--vscode-button-hoverBackground);
+    }
+    .action-btn:active {
+      background-color: var(--vscode-button-activeBackground);
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="card">
-      <h2>Session Overview</h2>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+        <h2 style="margin: 0;">Code Session Tracker - Real-time Dashboard</h2>
+        <div style="display: flex; gap: 10px;">
+          <button id="addNoteBtn" class="action-btn">📝 Add Note</button>
+          <button id="exportDataBtn" class="action-btn">💾 Export Data</button>
+        </div>
+      </div>
       <div class="overview-grid">
         <div class="overview-stat">
           <strong>Session Start:</strong>
-          <div id="sessionStart"></div>
+          <div id="sessionStart">Loading...</div>
         </div>
         <div class="overview-stat">
-          <strong>Session End:</strong>
-          <div id="sessionEnd"></div>
-        </div>
-        <div class="overview-stat">
-          <strong>Total Session Time:</strong>
-          <div id="totalSessionTime"></div>
+          <strong>Session Duration:</strong>
+          <div id="totalSessionTime">Loading...</div>
         </div>
         <div class="overview-stat">
           <strong>Active Coding Time:</strong>
-          <div id="activeCodingTime"></div>
+          <div id="activeCodingTime">Loading...</div>
         </div>
         <div class="overview-stat">
           <strong>Debugging Time:</strong>
-          <div id="debuggingTime"></div>
+          <div id="debuggingTime">Loading...</div>
         </div>
         <div class="overview-stat">
           <strong>Idle Time:</strong>
-          <div id="idleTime"></div>
+          <div id="idleTime">Loading...</div>
+        </div>
+        <div class="overview-stat">
+          <strong>Last Updated:</strong>
+          <div id="lastUpdated">Never</div>
         </div>
       </div>
     </div>
@@ -451,43 +580,49 @@ function getWebviewContent(): string {
       <div class="tab-content active" id="files-tab">
         <h3>File Activity</h3>
         <table id="fileActivityTable">
-          <tr>
-            <th>File</th>
-            <th>Language</th>
-            <th>Time Spent</th>
-            <th>Edits</th>
-          </tr>
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Language</th>
+              <th>Time Spent</th>
+              <th>Edits</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
         </table>
       </div>
 
       <div class="tab-content" id="folders-tab">
         <h3>Folder Activity</h3>
         <table id="folderActivityTable">
-          <tr>
-            <th>Folder</th>
-            <th>Time Spent</th>
-            <th>Files</th>
-          </tr>
+          <thead>
+            <tr>
+              <th>Folder</th>
+              <th>Time Spent</th>
+              <th>Files</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
         </table>
       </div>
 
       <div class="tab-content" id="languages-tab">
         <h3>Language Usage</h3>
         <table id="languageUsageTable">
-          <tr>
-            <th>Language</th>
-            <th>Time Spent</th>
-          </tr>
+          <thead>
+            <tr>
+              <th>Language</th>
+              <th>Time Spent</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
         </table>
-        <div class="chart-container" id="languageChart">
-          <!-- Chart will be placed here -->
-        </div>
       </div>
 
       <div class="tab-content" id="notes-tab">
         <h3>Session Notes</h3>
         <div id="notesContainer">
-          <p>No notes added yet.</p>
+          <p class="loading">No notes added yet.</p>
         </div>
       </div>
     </div>
@@ -498,89 +633,140 @@ function getWebviewContent(): string {
 
     // Format time in a readable way
     function formatTime(ms) {
-      const seconds = Math.floor(ms / 1000);
-      const minutes = Math.floor(seconds / 60);
-      const hours = Math.floor(minutes / 60);
+      if (!ms || ms < 0) return '0s';
+      
+      const totalSeconds = Math.floor(ms / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
       
       if (hours > 0) {
-        return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+        return \`\${hours}h \${minutes}m \${seconds}s\`;
       } else if (minutes > 0) {
-        return `${minutes}m ${seconds % 60}s`;
+        return \`\${minutes}m \${seconds}s\`;
       } else {
-        return `${seconds}s`;
+        return \`\${seconds}s\`;
       }
+    }
+
+    function formatFilePath(filePath) {
+      // Show only the filename and parent directory for better readability
+      const parts = filePath.split(/[\\/\\\\]/);
+      if (parts.length <= 2) return filePath;
+      return '...' + parts.slice(-2).join('/');
     }
 
     function updateDashboard(data) {
       // Update overview section
-      document.getElementById('sessionStart').textContent = new Date(data.sessionStart).toLocaleString();
-      document.getElementById('sessionEnd').textContent = data.sessionEnd ? new Date(data.sessionEnd).toLocaleString() : 'In Progress';
-      document.getElementById('totalSessionTime').textContent = formatTime(data.totalSessionTime || 0);
-      document.getElementById('activeCodingTime').textContent = formatTime(data.activeCodingTime);
-      document.getElementById('debuggingTime').textContent = formatTime(data.debuggingTime);
-      document.getElementById('idleTime').textContent = formatTime(data.idleTime);
+      document.getElementById('sessionStart').textContent = 
+        data.sessionStart ? new Date(data.sessionStart).toLocaleString() : 'Unknown';
+      
+      document.getElementById('totalSessionTime').textContent = 
+        formatTime(data.totalSessionTime || 0);
+      
+      document.getElementById('activeCodingTime').textContent = 
+        formatTime(data.activeCodingTime || 0);
+      
+      document.getElementById('debuggingTime').textContent = 
+        formatTime(data.debuggingTime || 0);
+      
+      document.getElementById('idleTime').textContent = 
+        formatTime(data.idleTime || 0);
+      
+      document.getElementById('lastUpdated').textContent = 
+        new Date().toLocaleTimeString();
 
-      // Update file activity table
+      // Update all tables
       updateFileTable(data);
-      
-      // Update folder activity table
       updateFolderTable(data);
-      
-      // Update language usage table
       updateLanguageTable(data);
-      
-      // Update notes
       updateNotes(data);
     }
     
     function updateFileTable(data) {
-      const fileTable = document.getElementById('fileActivityTable');
-      // Clear all except header
-      while(fileTable.rows.length > 1) fileTable.deleteRow(1);
+      const tbody = document.querySelector('#fileActivityTable tbody');
+      tbody.innerHTML = '';
+      
+      if (!data.fileActivity || Object.keys(data.fileActivity).length === 0) {
+        const row = tbody.insertRow();
+        const cell = row.insertCell(0);
+        cell.colSpan = 4;
+        cell.textContent = 'No file activity recorded yet.';
+        cell.style.textAlign = 'center';
+        cell.style.fontStyle = 'italic';
+        cell.style.color = 'var(--vscode-descriptionForeground)';
+        return;
+      }
       
       // Sort files by time spent (descending)
       const sortedFiles = Object.entries(data.fileActivity)
-        .sort((a, b) => b[1].timeSpent - a[1].timeSpent);
+        .sort((a, b) => (b[1].timeSpent || 0) - (a[1].timeSpent || 0));
       
       for (const [file, stats] of sortedFiles) {
-        const row = fileTable.insertRow();
-        row.insertCell(0).textContent = file;
+        const row = tbody.insertRow();
+        
+        const fileCell = row.insertCell(0);
+        fileCell.innerHTML = \`<span class="file-path" title="\${file}">\${formatFilePath(file)}</span>\`;
+        
         row.insertCell(1).textContent = stats.language || 'N/A';
-        row.insertCell(2).textContent = formatTime(stats.timeSpent);
-        row.insertCell(3).textContent = stats.edits;
+        row.insertCell(2).textContent = formatTime(stats.timeSpent || 0);
+        row.insertCell(3).textContent = stats.edits || 0;
       }
     }
     
     function updateFolderTable(data) {
-      const folderTable = document.getElementById('folderActivityTable');
-      // Clear all except header
-      while(folderTable.rows.length > 1) folderTable.deleteRow(1);
+      const tbody = document.querySelector('#folderActivityTable tbody');
+      tbody.innerHTML = '';
+      
+      if (!data.folderActivity || Object.keys(data.folderActivity).length === 0) {
+        const row = tbody.insertRow();
+        const cell = row.insertCell(0);
+        cell.colSpan = 3;
+        cell.textContent = 'No folder activity recorded yet.';
+        cell.style.textAlign = 'center';
+        cell.style.fontStyle = 'italic';
+        cell.style.color = 'var(--vscode-descriptionForeground)';
+        return;
+      }
       
       // Sort folders by time spent (descending)
-      const sortedFolders = Object.entries(data.folderActivity || {})
-        .sort((a, b) => b[1].timeSpent - a[1].timeSpent);
+      const sortedFolders = Object.entries(data.folderActivity)
+        .sort((a, b) => (b[1].timeSpent || 0) - (a[1].timeSpent || 0));
       
       for (const [folder, stats] of sortedFolders) {
-        const row = folderTable.insertRow();
-        row.insertCell(0).textContent = folder;
-        row.insertCell(1).textContent = formatTime(stats.timeSpent);
-        row.insertCell(2).textContent = stats.files;
+        const row = tbody.insertRow();
+        
+        const folderCell = row.insertCell(0);
+        folderCell.innerHTML = \`<span class="file-path" title="\${folder}">\${formatFilePath(folder)}</span>\`;
+        
+        row.insertCell(1).textContent = formatTime(stats.timeSpent || 0);
+        row.insertCell(2).textContent = stats.files || 0;
       }
     }
     
     function updateLanguageTable(data) {
-      const langTable = document.getElementById('languageUsageTable');
-      while(langTable.rows.length > 1) langTable.deleteRow(1);
+      const tbody = document.querySelector('#languageUsageTable tbody');
+      tbody.innerHTML = '';
+      
+      if (!data.languageUsage || Object.keys(data.languageUsage).length === 0) {
+        const row = tbody.insertRow();
+        const cell = row.insertCell(0);
+        cell.colSpan = 2;
+        cell.textContent = 'No language usage recorded yet.';
+        cell.style.textAlign = 'center';
+        cell.style.fontStyle = 'italic';
+        cell.style.color = 'var(--vscode-descriptionForeground)';
+        return;
+      }
       
       const sortedLangs = Object.entries(data.languageUsage)
+        .filter(([lang, time]) => lang && time > 0)
         .sort((a, b) => b[1] - a[1]);
       
       for (const [lang, time] of sortedLangs) {
-        if (lang) { // Only show non-empty languages
-          const row = langTable.insertRow();
-          row.insertCell(0).textContent = lang;
-          row.insertCell(1).textContent = formatTime(time);
-        }
+        const row = tbody.insertRow();
+        row.insertCell(0).textContent = lang;
+        row.insertCell(1).textContent = formatTime(time);
       }
     }
     
@@ -590,6 +776,7 @@ function getWebviewContent(): string {
       
       if (data.customNotes && data.customNotes.length > 0) {
         const ul = document.createElement('ul');
+        ul.className = 'notes-list';
         for (const note of data.customNotes) {
           const li = document.createElement('li');
           li.textContent = note;
@@ -597,7 +784,7 @@ function getWebviewContent(): string {
         }
         notesContainer.appendChild(ul);
       } else {
-        notesContainer.innerHTML = '<p>No notes added yet.</p>';
+        notesContainer.innerHTML = '<p class="loading">No notes added yet.</p>';
       }
     }
 
@@ -613,16 +800,29 @@ function getWebviewContent(): string {
         
         // Show corresponding tab content
         const tabName = tab.getAttribute('data-tab');
-        document.getElementById(`${tabName}-tab`).classList.add('active');
+        document.getElementById(\`\${tabName}-tab\`).classList.add('active');
       });
     });
 
+    // Listen for messages from the extension
     window.addEventListener('message', event => {
       const message = event.data;
       if (message.type === 'update') {
         updateDashboard(message.data);
       }
     });
+
+    // Handle button clicks
+    document.getElementById('addNoteBtn').addEventListener('click', () => {
+      vscode.postMessage({ command: 'addNote' });
+    });
+
+    document.getElementById('exportDataBtn').addEventListener('click', () => {
+      vscode.postMessage({ command: 'exportData' });
+    });
+
+    // Request initial data
+    console.log('Dashboard loaded, waiting for data...');
   </script>
 </body>
 </html>
@@ -635,5 +835,16 @@ export function deactivate() {
   saveSessionFile();
   
   // Clear all intervals
-  clearInterval(activityCheckInterval);
+  if (activityCheckInterval) {
+    clearInterval(activityCheckInterval);
+  }
+  if (dashboardUpdateInterval) {
+    clearInterval(dashboardUpdateInterval);
+  }
+  
+  // Clean up dashboard panels
+  activeDashboardPanels.forEach(panel => {
+    panel.dispose();
+  });
+  activeDashboardPanels = [];
 }
