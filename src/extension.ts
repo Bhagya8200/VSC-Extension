@@ -9,6 +9,7 @@ interface FileStats {
   timeSpent: number;
   edits: number;
   folderPath: string;
+  notes: string[]; // Added notes array for file-specific notes
 }
 
 interface FolderStats {
@@ -156,6 +157,42 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
 
+    vscode.commands.registerCommand("codeSessionTracker.addFileNote", async (filePath: string) => {
+      const note = await vscode.window.showInputBox({
+        prompt: `Add a note for ${path.basename(filePath)}`,
+        placeHolder: "e.g., Implemented new authentication method",
+        ignoreFocusOut: true
+      });
+      
+      if (note && note.trim()) {
+        try {
+          // Initialize file stats if they don't exist
+          if (!fileStats[filePath]) {
+            const lang = path.extname(filePath).slice(1);
+            const folderPath = path.dirname(filePath);
+            updateFileStats(filePath, lang, folderPath);
+          }
+          
+          // Add note with timestamp
+          const timestamp = new Date().toLocaleString();
+          const noteWithTimestamp = `${timestamp}: ${note.trim()}`;
+          
+          if (!fileStats[filePath].notes) {
+            fileStats[filePath].notes = [];
+          }
+          fileStats[filePath].notes.push(noteWithTimestamp);
+          
+          // Save to file
+          saveSessionFile();
+          
+          vscode.window.showInformationMessage(`Note added for ${path.basename(filePath)}`);
+          broadcastToDashboards();
+        } catch (error) {
+          vscode.window.showErrorMessage(`Failed to add file note: ${error}`);
+        }
+      }
+    }),
+
     vscode.commands.registerCommand("codeSessionTracker.showDashboard", () => {
       const panel = vscode.window.createWebviewPanel(
         "codeSessionDashboard",
@@ -179,6 +216,10 @@ export function activate(context: vscode.ExtensionContext) {
             case 'addNote':
               // Execute the add note command
               vscode.commands.executeCommand('codeSessionTracker.addNote');
+              break;
+            case 'addFileNote':
+              // Execute the add file note command
+              vscode.commands.executeCommand('codeSessionTracker.addFileNote', message.filePath);
               break;
             case 'exportData':
               // Execute the export command
@@ -246,7 +287,8 @@ function updateFileStats(filePath: string, language: string, folderPath: string)
       language: language, 
       timeSpent: 0, 
       edits: 0,
-      folderPath: folderPath 
+      folderPath: folderPath,
+      notes: [] // Initialize notes array
     };
   }
   fileStats[filePath].edits++;
@@ -359,7 +401,18 @@ function loadSessionData(): SessionData {
   if (fs.existsSync(logPath)) {
     try {
       const content = fs.readFileSync(logPath, "utf8");
-      return JSON.parse(content);
+      const data = JSON.parse(content);
+      
+      // Migrate existing data to include notes if they don't exist
+      if (data.fileActivity) {
+        Object.values(data.fileActivity).forEach((fileData: any) => {
+          if (!fileData.notes) {
+            fileData.notes = [];
+          }
+        });
+      }
+      
+      return data;
     } catch (error) {
       console.error("Error loading session data:", error);
     }
@@ -529,6 +582,120 @@ function getWebviewContent(): string {
     .action-btn:active {
       background-color: var(--vscode-button-activeBackground);
     }
+    .add-note-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 1.2em;
+      padding: 4px 8px;
+      border-radius: 3px;
+      color: var(--vscode-foreground);
+    }
+    .add-note-btn:hover {
+      background-color: var(--vscode-list-hoverBackground);
+    }
+    .file-notes {
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .file-notes-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .file-notes-list li {
+      margin: 2px 0;
+      padding: 2px 0;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .file-notes-list li:last-child {
+      border-bottom: none;
+    }
+    .notes-cell {
+      position: relative;
+    }
+    .notes-tooltip {
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: var(--vscode-editor-background);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      padding: 8px;
+      max-width: 300px;
+      z-index: 1000;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      display: none;
+    }
+    .notes-cell:hover .notes-tooltip {
+      display: block;
+    }
+    
+    /* Modal styles */
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0,0,0,0.5);
+    }
+    .modal-content {
+      background-color: var(--vscode-editor-background);
+      margin: 15% auto;
+      padding: 20px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      width: 80%;
+      max-width: 500px;
+    }
+    .modal h3 {
+      margin-top: 0;
+    }
+    .modal textarea {
+      width: 100%;
+      min-height: 100px;
+      padding: 8px;
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      background-color: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font-family: inherit;
+      resize: vertical;
+    }
+    .modal-buttons {
+      margin-top: 15px;
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+    .modal-buttons button {
+      padding: 8px 16px;
+      border: 1px solid var(--vscode-button-border);
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .modal-buttons .save-btn {
+      background-color: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    .modal-buttons .save-btn:hover {
+      background-color: var(--vscode-button-hoverBackground);
+    }
+    .modal-buttons .cancel-btn {
+      background-color: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    .modal-buttons .cancel-btn:hover {
+      background-color: var(--vscode-button-secondaryHoverBackground);
+    }
   </style>
 </head>
 <body>
@@ -586,6 +753,7 @@ function getWebviewContent(): string {
               <th>Language</th>
               <th>Time Spent</th>
               <th>Edits</th>
+              <th>Notes</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -628,8 +796,21 @@ function getWebviewContent(): string {
     </div>
   </div>
 
+  <!-- File Note Modal -->
+  <div id="fileNoteModal" class="modal">
+    <div class="modal-content">
+      <h3 id="modalTitle">Add Note for File</h3>
+      <textarea id="noteInput" placeholder="Enter your note here..."></textarea>
+      <div class="modal-buttons">
+        <button id="saveNoteBtn" class="save-btn">Save</button>
+        <button id="cancelNoteBtn" class="cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const vscode = acquireVsCodeApi();
+    let currentFileForNote = null;
 
     // Format time in a readable way
     function formatTime(ms) {
@@ -690,7 +871,7 @@ function getWebviewContent(): string {
       if (!data.fileActivity || Object.keys(data.fileActivity).length === 0) {
         const row = tbody.insertRow();
         const cell = row.insertCell(0);
-        cell.colSpan = 4;
+        cell.colSpan = 5;
         cell.textContent = 'No file activity recorded yet.';
         cell.style.textAlign = 'center';
         cell.style.fontStyle = 'italic';
@@ -711,6 +892,49 @@ function getWebviewContent(): string {
         row.insertCell(1).textContent = stats.language || 'N/A';
         row.insertCell(2).textContent = formatTime(stats.timeSpent || 0);
         row.insertCell(3).textContent = stats.edits || 0;
+        
+        // Notes cell with add button and preview
+        const notesCell = row.insertCell(4);
+        notesCell.className = 'notes-cell';
+        
+        const notesContainer = document.createElement('div');
+        notesContainer.style.display = 'flex';
+        notesContainer.style.alignItems = 'center';
+        notesContainer.style.gap = '5px';
+        
+        // Add note button
+        const addNoteBtn = document.createElement('button');
+        addNoteBtn.className = 'add-note-btn';
+        addNoteBtn.textContent = '+';
+        addNoteBtn.title = 'Add note for this file';
+        addNoteBtn.onclick = () => openFileNoteModal(file);
+        
+        // Notes preview
+        const notesPreview = document.createElement('div');
+        notesPreview.className = 'file-notes';
+        
+        if (stats.notes && stats.notes.length > 0) {
+          notesPreview.textContent = \`\${stats.notes.length} note\${stats.notes.length > 1 ? 's' : ''}\`;
+          
+          // Tooltip with full notes
+          const tooltip = document.createElement('div');
+          tooltip.className = 'notes-tooltip';
+          const notesList = document.createElement('ul');
+          notesList.className = 'file-notes-list';
+          stats.notes.forEach(note => {
+            const listItem = document.createElement('li');
+            listItem.textContent = note;
+            notesList.appendChild(listItem);
+          });
+          tooltip.appendChild(notesList);
+          notesCell.appendChild(tooltip);
+        } else {
+          notesPreview.textContent = 'No notes';
+        }
+        
+        notesContainer.appendChild(addNoteBtn);
+        notesContainer.appendChild(notesPreview);
+        notesCell.appendChild(notesContainer);
       }
     }
     
@@ -788,6 +1012,31 @@ function getWebviewContent(): string {
       }
     }
 
+    // File note modal functions
+    function openFileNoteModal(filePath) {
+      currentFileForNote = filePath;
+      document.getElementById('modalTitle').textContent = \`Add Note for \${formatFilePath(filePath)}\`;
+      document.getElementById('noteInput').value = '';
+      document.getElementById('fileNoteModal').style.display = 'block';
+      document.getElementById('noteInput').focus();
+    }
+
+    function closeFileNoteModal() {
+      document.getElementById('fileNoteModal').style.display = 'none';
+      currentFileForNote = null;
+    }
+
+    function saveFileNote() {
+      const noteText = document.getElementById('noteInput').value.trim();
+      if (noteText && currentFileForNote) {
+        vscode.postMessage({ 
+          command: 'addFileNote', 
+          filePath: currentFileForNote 
+        });
+        closeFileNoteModal();
+      }
+    }
+
     // Handle tab switching
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
@@ -819,6 +1068,26 @@ function getWebviewContent(): string {
 
     document.getElementById('exportDataBtn').addEventListener('click', () => {
       vscode.postMessage({ command: 'exportData' });
+    });
+
+    // Modal event listeners
+    document.getElementById('saveNoteBtn').addEventListener('click', saveFileNote);
+    document.getElementById('cancelNoteBtn').addEventListener('click', closeFileNoteModal);
+
+    // Close modal when clicking outside
+    document.getElementById('fileNoteModal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('fileNoteModal')) {
+        closeFileNoteModal();
+      }
+    });
+
+    // Handle Enter key in textarea to save (Ctrl+Enter or Cmd+Enter)
+    document.getElementById('noteInput').addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        saveFileNote();
+      } else if (e.key === 'Escape') {
+        closeFileNoteModal();
+      }
     });
 
     // Request initial data
