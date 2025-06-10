@@ -23,7 +23,6 @@ interface SessionData {
   totalSessionTime?: number;
   activeCodingTime: number;
   debuggingTime: number;
-  idleTime: number;
   fileActivity: Record<string, FileStats>;
   folderActivity: Record<string, FolderStats>;
   languageUsage: Record<string, number>;
@@ -34,12 +33,9 @@ const logPath = path.join(os.homedir(), ".code-session-tracker.json");
 let sessionStart = Date.now();
 let lastActivityTime = Date.now();
 let lastEditTime = 0;
-let idleTimeout = 3 * 60 * 1000; // 3 minutes
 let debugStartTime: number | null = null;
 let activeCodingTime = 0;
 let debuggingTime = 0;
-let idleTime = 0;
-let isIdle = false;
 let activityCheckInterval: NodeJS.Timeout;
 let dashboardUpdateInterval: NodeJS.Timeout;
 const fileStats: Record<string, FileStats> = {};
@@ -64,11 +60,6 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument((e) => {
       const now = Date.now();
-      
-      // Reset idle state
-      if (isIdle) {
-        isIdle = false;
-      }
       
       lastActivityTime = now;
       
@@ -123,7 +114,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.debug.onDidStartDebugSession(() => {
       debugStartTime = Date.now();
       lastActivityTime = debugStartTime;
-      isIdle = false;
       broadcastToDashboards();
     }),
 
@@ -319,19 +309,6 @@ function startActivityChecking() {
   activityCheckInterval = setInterval(() => {
     const now = Date.now();
     
-    // Check if user is idle
-    if (!isIdle && now - lastActivityTime > idleTimeout) {
-      isIdle = true;
-      // Add idle time since the timeout period
-      const additionalIdleTime = (now - lastActivityTime) - idleTimeout;
-      if (additionalIdleTime > 0) {
-        idleTime += additionalIdleTime;
-      }
-    } else if (isIdle) {
-      // Continue adding idle time while user is idle
-      idleTime += 60000; // Add 1 minute
-    }
-    
     // Update time spent on current file
     updateFileTimeSpent();
     
@@ -389,7 +366,6 @@ function getCurrentSessionData(): SessionData {
     totalSessionTime,
     activeCodingTime,
     debuggingTime,
-    idleTime,
     fileActivity: { ...fileStats },
     folderActivity: { ...folderStats },
     languageUsage: { ...languageUsage },
@@ -422,7 +398,6 @@ function loadSessionData(): SessionData {
     sessionStart: new Date(sessionStart).toISOString(),
     activeCodingTime: 0,
     debuggingTime: 0,
-    idleTime: 0,
     fileActivity: {},
     folderActivity: {},
     languageUsage: {},
@@ -443,7 +418,6 @@ function initializeSessionFile() {
     sessionStart: new Date(sessionStart).toISOString(),
     activeCodingTime: 0,
     debuggingTime: 0,
-    idleTime: 0,
     fileActivity: {},
     folderActivity: {},
     languageUsage: {},
@@ -634,68 +608,6 @@ function getWebviewContent(): string {
     .notes-cell:hover .notes-tooltip {
       display: block;
     }
-    
-    /* Modal styles */
-    .modal {
-      display: none;
-      position: fixed;
-      z-index: 1000;
-      left: 0;
-      top: 0;
-      width: 100%;
-      height: 100%;
-      background-color: rgba(0,0,0,0.5);
-    }
-    .modal-content {
-      background-color: var(--vscode-editor-background);
-      margin: 15% auto;
-      padding: 20px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 6px;
-      width: 80%;
-      max-width: 500px;
-    }
-    .modal h3 {
-      margin-top: 0;
-    }
-    .modal textarea {
-      width: 100%;
-      min-height: 100px;
-      padding: 8px;
-      border: 1px solid var(--vscode-input-border);
-      border-radius: 4px;
-      background-color: var(--vscode-input-background);
-      color: var(--vscode-input-foreground);
-      font-family: inherit;
-      resize: vertical;
-    }
-    .modal-buttons {
-      margin-top: 15px;
-      display: flex;
-      gap: 10px;
-      justify-content: flex-end;
-    }
-    .modal-buttons button {
-      padding: 8px 16px;
-      border: 1px solid var(--vscode-button-border);
-      border-radius: 4px;
-      cursor: pointer;
-      font-family: inherit;
-    }
-    .modal-buttons .save-btn {
-      background-color: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-    }
-    .modal-buttons .save-btn:hover {
-      background-color: var(--vscode-button-hoverBackground);
-    }
-    .modal-buttons .cancel-btn {
-      background-color: var(--vscode-button-secondaryBackground);
-      color: var(--vscode-button-secondaryForeground);
-    }
-    .modal-buttons .cancel-btn:hover {
-      background-color: var(--vscode-button-secondaryHoverBackground);
-    }
   </style>
 </head>
 <body>
@@ -724,10 +636,6 @@ function getWebviewContent(): string {
         <div class="overview-stat">
           <strong>Debugging Time:</strong>
           <div id="debuggingTime">Loading...</div>
-        </div>
-        <div class="overview-stat">
-          <strong>Idle Time:</strong>
-          <div id="idleTime">Loading...</div>
         </div>
         <div class="overview-stat">
           <strong>Last Updated:</strong>
@@ -796,18 +704,6 @@ function getWebviewContent(): string {
     </div>
   </div>
 
-  <!-- File Note Modal -->
-  <div id="fileNoteModal" class="modal">
-    <div class="modal-content">
-      <h3 id="modalTitle">Add Note for File</h3>
-      <textarea id="noteInput" placeholder="Enter your note here..."></textarea>
-      <div class="modal-buttons">
-        <button id="saveNoteBtn" class="save-btn">Save</button>
-        <button id="cancelNoteBtn" class="cancel-btn">Cancel</button>
-      </div>
-    </div>
-  </div>
-
   <script>
     const vscode = acquireVsCodeApi();
     let currentFileForNote = null;
@@ -850,9 +746,6 @@ function getWebviewContent(): string {
       
       document.getElementById('debuggingTime').textContent = 
         formatTime(data.debuggingTime || 0);
-      
-      document.getElementById('idleTime').textContent = 
-        formatTime(data.idleTime || 0);
       
       document.getElementById('lastUpdated').textContent = 
         new Date().toLocaleTimeString();
@@ -907,7 +800,13 @@ function getWebviewContent(): string {
         addNoteBtn.className = 'add-note-btn';
         addNoteBtn.textContent = '+';
         addNoteBtn.title = 'Add note for this file';
-        addNoteBtn.onclick = () => openFileNoteModal(file);
+        addNoteBtn.onclick = () => {
+          // Instead of opening modal, directly trigger the VS Code command
+          vscode.postMessage({ 
+            command: 'addFileNote', 
+            filePath: file 
+          });
+        };
         
         // Notes preview
         const notesPreview = document.createElement('div');
@@ -1012,31 +911,6 @@ function getWebviewContent(): string {
       }
     }
 
-    // File note modal functions
-    function openFileNoteModal(filePath) {
-      currentFileForNote = filePath;
-      document.getElementById('modalTitle').textContent = \`Add Note for \${formatFilePath(filePath)}\`;
-      document.getElementById('noteInput').value = '';
-      document.getElementById('fileNoteModal').style.display = 'block';
-      document.getElementById('noteInput').focus();
-    }
-
-    function closeFileNoteModal() {
-      document.getElementById('fileNoteModal').style.display = 'none';
-      currentFileForNote = null;
-    }
-
-    function saveFileNote() {
-      const noteText = document.getElementById('noteInput').value.trim();
-      if (noteText && currentFileForNote) {
-        vscode.postMessage({ 
-          command: 'addFileNote', 
-          filePath: currentFileForNote 
-        });
-        closeFileNoteModal();
-      }
-    }
-
     // Handle tab switching
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
@@ -1068,26 +942,6 @@ function getWebviewContent(): string {
 
     document.getElementById('exportDataBtn').addEventListener('click', () => {
       vscode.postMessage({ command: 'exportData' });
-    });
-
-    // Modal event listeners
-    document.getElementById('saveNoteBtn').addEventListener('click', saveFileNote);
-    document.getElementById('cancelNoteBtn').addEventListener('click', closeFileNoteModal);
-
-    // Close modal when clicking outside
-    document.getElementById('fileNoteModal').addEventListener('click', (e) => {
-      if (e.target === document.getElementById('fileNoteModal')) {
-        closeFileNoteModal();
-      }
-    });
-
-    // Handle Enter key in textarea to save (Ctrl+Enter or Cmd+Enter)
-    document.getElementById('noteInput').addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        saveFileNote();
-      } else if (e.key === 'Escape') {
-        closeFileNoteModal();
-      }
     });
 
     // Request initial data
