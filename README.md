@@ -1,71 +1,77 @@
-# code-session-tracker README
-
-This is the README for your extension "code-session-tracker". After writing up a brief description, we recommend including the following sections.
+# Code Session Tracker - Real-time Dashboard
+A Visual Studio Code extension that helps you track your coding sessions in real time. Get instant insights into your session start time, duration, active coding time, debugging time, and file activity—all within an interactive dashboard.
 
 ## Features
+### Real-time Dashboard
+View a live dashboard displaying your current session's statistics, including:
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+* Session Start Time
 
-For example if there is an image subfolder under your extension project workspace:
+* Session Duration
 
-\!\[feature X\]\(images/feature-x.png\)
+* Active Coding Time
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+* Debugging Time
+
+* Last Updated Timestamp
+
+### File Activity Tracking
+See detailed statistics for each file you work on, such as:
+
+* File name and path
+
+* Programming language
+
+* Time spent on each file
+
+* Number of edits
+
+* Notes per file
+
+### Organized Views
+Quickly switch between activity grouped by:
+
+* Files
+
+* Folders
+
+* Languages
+
+* Notes
+
+### Session Notes & Data Export
+
+* Add custom notes to any session or file.
+
+* Export your session data with a single click.
+
+## Getting Started
+1. Install the Extension
+
+* Search for Code Session Tracker in the VS Code Extensions Marketplace and install.
+
+2. Activate the Dashboard
+
+* Open the command palette (Ctrl+Shift+P), then run Code Session Tracker: Open Dashboard.
+
+3. Start Coding
+
+* The extension automatically tracks your session as you work. View real-time stats in the dashboard panel.
+
+## Usage
+#### Add Notes:
+Click the "Add Note" button to attach notes to your session or files.
+
+#### Export Data:
+Click "Export Data" to save your session statistics for later review.
+
+#### Monitor Activity:
+The dashboard updates live as you code, showing all tracked metrics and file activities.
+
+## Example Dashboard
+The dashboard displays session start/end times, duration, active coding/debugging times, and a table of recent file activity with time spent and edits per file.
 
 ## Requirements
+* Visual Studio Code (latest version recommended)
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
-
-## Extension Settings
-
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
-
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+* No additional dependencies required
